@@ -1,0 +1,389 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  WikiConfig:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        ConfigMapData:
+          Type: String
+          Default: |
+            mediawiki:
+              wgServer: "http://$(POD_IP):$(POD_PORT)/"
+              wgDBserver: "$(MYSQL_HOST)"
+              wgDBname: "$(MYSQL_DATABASE)"
+              wgDBuser: "$(MYSQL_USER)"
+              wgDBpassword: "$(MYSQL_PASSWORD)"
+          Description: Configuration data for the MediaWiki application
+        SecretData:
+          Type: String
+          Default: |
+            MYSQL_USER: myuser
+            MYSQL_PASSWORD: mypassword
+          Description: Credentials for the MySQL database
+        CSVData:
+          Type: String
+          Default: |-
+            Name, Age
+            Ram, 30
+            Shyam, 40
+          Description: The MediaWiki application
+      TemplateURL: 'https://s3.amazonaws.com/cloudformation-templates-us-east-1/mediawiki-on-kubernetes-with-mysql.yaml'
+
+Resources:
+  CsvData:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c94855ba95c71c98
+      InstanceType: t2.micro
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo '${CSVData}' > /tmp/sample.csv
+          aws s3 cp /tmp/sample.csv s3://${BucketName}/sample.csv
+
+  MysqlSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: mediawiki/mysql
+      Description: Credentials for MySQL database
+      SecretString: !Sub |
+        {
+          "username": "${MYSQL_USER}",
+          "password": "${MYSQL_PASSWORD}"
+        }
+
+  ConfigMap:
+    Type: AWS::Kubernetes::ConfigMap
+    Properties:
+      Name: mediawiki-config
+      Data:
+        ConfigMapData: !Sub |
+          mediawiki:
+            wgServer: "http://$(POD_IP):$(POD_PORT)/"
+            wgDBserver: "$(MYSQL_HOST)"
+            wgDBname: "$(MYSQL_DATABASE)" 
+            wgDBuser: "$(MYSQL_USER)"
+            wgDBpassword: "$(MYSQL_PASSWORD)"
+      Metadata:
+        Annotations:
+          name: "mediawiki-config"
+
+  Deployment:
+    Type: AWS::Kubernetes::Deployment
+    Properties:
+      ApiVersion: apps/v1
+      Kind: Deployment
+      Metadata:
+        Name: mediawiki
+        Labels:
+          app: mediawiki
+      Spec:
+        Replicas: 1
+        Selector:
+          MatchLabels:
+            app: mediawiki
+        Template:
+          Metadata:
+            Labels:
+              app: mediawiki
+          Spec:
+            Containers:
+              - Name: mediawiki
+                Image: mediawiki:latest
+                Env:
+                  - Name: CSV_FILE
+                    Value: /data/sample.csv
+                VolumeMounts:
+                  - Name: csv-data
+                    MountPath: /data
+                  - Name: config-volume
+                    MountPath: /config
+            Volumes:
+              - Name: csv-data
+                ConfigMap:
+                  Name: csv-data
+                  Items:
+                    - Key: sample.csv
+                      Path: sample.csv
+              - Name: config-volume
+                Ports:
+                  - Name: http
+                    ContainerPort: 80
+                    Protocol: TCP
+              - Name: mysql
+                Image: mysql:5.7
+                Env:
+                  - Name: MYSQL_ROOT_PASSWORD
+                    Value: $(MYSQL_ROOT_PASSWORD)
+                VolumeMounts:
+                  - Name: data
+                    MountPath: /var/lib/mysql
+            Volumes:
+              - Name: data
+                EmptyDir: {}
+            RestartPolicy: Always
+            NodeSelector:
+              type: worker
+            Tolerations:
+              - Effect: NoSchedule
+                Operator: Exists
+            Affinity:
+              PodAntiAffinity:
+                RequiredDuringSchedulingIgnoredDuringExecution:
+                - LabelSelector:
+                    MatchExpressions:
+                      - Key: app
+                        Operator: In
+                        Values:
+                        - mediawiki
+                  TopologyKey: "kubernetes.io/hostname"
+
+  Service:
+    Type: AWS::Kubernetes::Service
+    Properties:
+      ApiVersion: v1
+      Kind: Service
+      Metadata:
+        Name: mediawiki
+        Annotations:
+          service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+      Spec:
+        Selector:
+          app: mediawiki
+        Ports:
+        - Name: http
+          Port: 80
+          TargetPort: 80
+
+  PodA:
+    Type: AWS::Kubernetes::Pod
+    Properties:
+      ApiVersion: v1
+      Kind: Pod
+      Metadata:
+        Name: pod-a
+        Labels:
+          app: pod-a
+      Spec:
+        Containers:
+          - Name: container
+            Image: nginx
+            Resources:
+              Requests:
+                memory: 400Mi
+              Limits:
+                memory: 400Mi
+
+  PodB:
+    Type: AWS::Kubernetes::Pod
+    Properties:
+      ApiVersion: v1
+      Kind: Pod
+      Metadata:
+        Name: pod-b
+        Labels:
+          app: pod-b
+      Spec:
+        Containers:
+          - Name: container
+            Image: nginx
+            Resources:
+              Requests:
+                memory: 200Mi
+              Limits:
+                memory: 200Mi
+
+  PodC:
+    Type: AWS::Kubernetes::Pod
+    Properties:
+      ApiVersion: v1
+      Kind: Pod
+      Metadata:
+        Name: pod-c
+        Labels:
+          app: pod-c
+      Spec:
+        Containers:
+          - Name: container
+            Image: nginx
+            Resources:
+              Requests:
+                memory: 400Mi
+              Limits:
+                memory: 400Mi
+  ConfigMap:
+    Type: AWS::Kubernetes::ConfigMap
+    Properties:
+      ApiVersion: v1
+      Kind: ConfigMap
+      Metadata:
+        Name: mediawiki-config
+      Data:
+        LocalSettings.php: |
+          <?php
+          ## Database settings
+          $wgDBtype = "mysql";
+          $wgDBserver = "$(MYSQL_HOST)";
+          $wgDBname = "$(MYSQL_DATABASE)";
+          $wgDBuser = "$(MYSQL_USER)";
+          $wgDBpassword = "$(MYSQL_PASSWORD)";
+          $wgDBprefix = "";
+          $wgDBTableOptions = "ENGINE=InnoDB, DEFAULT CHARSET=utf8";
+
+          ## Site settings
+          $wgSitename = "MyWiki";
+          $wgMetaNamespace = "MyWiki";
+          $wgScriptPath = "";
+          $wgArticlePath = "/wiki/$1";
+          $wgUsePathInfo = true;
+
+          ## Debugging
+          #$wgShowExceptionDetails = true;
+          #$wgShowDBErrorBacktrace = true;
+
+  Secret:
+    Type: AWS::Kubernetes::Secret
+    Properties:
+      ApiVersion: v1
+      Kind: Secret
+      Metadata:
+        Name: mediawiki-secret
+      Type: Opaque
+      Data:
+        username: $(echo -n 'myuser' | base64)
+        password: $(echo -n 'mypassword' | base64)
+
+  MediawikiDeployment:
+    Type: AWS::Kubernetes::Deployment
+    Properties:
+      ApiVersion: apps/v1
+      Kind: Deployment
+      Metadata:
+        Name: mediawiki
+      Spec:
+        Replicas: 1
+        Selector:
+          MatchLabels:
+            app: mediawiki
+        Template:
+          Metadata:
+            Labels:
+              app: mediawiki
+          Spec:
+            Containers:
+              - Name: mediawiki
+                Image: mediawiki:latest
+                Env:
+                  - Name: MYSQL_HOST
+                    Value: mysql
+                  - Name: MYSQL_DATABASE
+                    Value: my_wiki
+                  - Name: MYSQL_USER
+                    ValueFrom:
+                      SecretKeyRef:
+                        Name: mediawiki-secret
+                        Key: username
+                  - Name: MYSQL_PASSWORD
+                    ValueFrom:
+                      SecretKeyRef:
+                        Name: mediawiki-secret
+                        Key: password
+                  - Name: MEDIAWIKI_ADMIN_USER
+                    Value: admin
+                  - Name: MEDIAWIKI_ADMIN_PASS
+                    Value: adminpass
+                  - Name: MEDIAWIKI_SITE_SERVER
+                    Value: https://$(SERVICE_NAME).$(NAMESPACE).svc.cluster.local
+                  - Name: MEDIAWIKI_SITE_NAME
+                    Value: MyWiki
+                  - Name: MEDIAWIKI_DB_NAME
+                    Value: my_wiki
+                  - Name: MEDIAWIKI_UPDATE_DB
+                    Value: "1"
+                  - Name: MEDIAWIKI_IMPORT_DATA
+                    Value: "1"
+                VolumeMounts:
+                  - Name: mediawiki-config
+                    MountPath: /var/www/html/LocalSettings.php
+                    SubPath: LocalSettings.php
+                Ports:
+                  - Name: http
+                    ContainerPort: 80
+                    Protocol: TCP
+            Volumes:
+              - Name: mediawiki-config
+                ConfigMap:
+                  Name: mediawiki-config
+            RestartPolicy: Always
+            NodeSelector:
+              type: worker
+            Tolerations:
+              - Effect: NoSchedule
+                Operator: Exists
+  MysqlDeployment:
+    Type: AWS::Kubernetes::Deployment
+    Properties:
+      ApiVersion: apps/v1
+      Kind: Deployment
+      Metadata:
+        Name: mysql
+      Spec:
+        Replicas: 1
+        Selector:
+          MatchLabels:
+            app: mysql
+        Template:
+          Metadata:
+            Labels:
+              app: mysql
+          Spec:
+            Containers:
+              - Name: mysql
+                Image: mysql:5.7
+                Env:
+                  - Name: MYSQL_ROOT_PASSWORD
+                    ValueFrom:
+                      SecretKeyRef:
+                        Name: mysql-secret
+                        Key: password
+                  - Name: MYSQL_DATABASE
+                    Value: my_wiki
+                  - Name: MYSQL_USER
+                    ValueFrom:
+                      SecretKeyRef:
+                        Name: mediawiki-secret
+                        Key: username
+                  - Name: MYSQL_PASSWORD
+                    ValueFrom:
+                      SecretKeyRef:
+                        Name: mediawiki-secret
+                        Key: password
+                VolumeMounts:
+                  - Name: mysql-persistent-storage
+                    MountPath: /var/lib/mysql
+                Ports:
+                  - Name: mysql
+                    ContainerPort: 3306
+                    Protocol: TCP
+            Volumes:
+              - Name: mysql-persistent-storage
+                PersistentVolumeClaim:
+                  ClaimName: mysql-pv-claim
+            RestartPolicy: Always
+            NodeSelector:
+              type: worker
+            Tolerations:
+              - Effect: NoSchedule
+                Operator: Exists
+            Affinity:
+              PodAntiAffinity:
+                RequiredDuringSchedulingIgnoredDuringExecution:
+                - LabelSelector:
+                    MatchExpressions:
+                      - Key: app
+                        Operator: In
+                        Values:
+                          - mysql
+
+
+
